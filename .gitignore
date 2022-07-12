@@ -1,2 +1,5 @@
 **/.ipynb_checkpoints/**
-*.zip
+**/*.zip
+**/*.nc
+**/*.gdb/*
+**/.goutputstream-IUZVJ1
