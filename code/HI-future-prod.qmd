@@ -1,0 +1,114 @@
+---
+jupyter: python3
+---
+
+## Import libraries
+
+```{python}
+import numpy as np
+import matplotlib.pyplot as plt
+import geopandas as gpd
+import pandas as pd
+import glob
+import os
+import rasterio
+import xarray as xr
+import scipy
+import re
+```
+
+## Import NetCDF data 
+
+```{python}
+models = ["SMHI-RCA", "MPICSC-REMO1", "DMI-HIRHAM"]
+variants = ["RCP85", "RCP45", "RCP26"]
+variables = ["tas", "tasmax"]
+years = range(2031, 2041)
+
+models_dict = {model: {variant: glob.glob("../data/prognosedaten/*"+"_"+"*"+model+"*"+variant+"*"+".nc") for variant in variants} for model in models}
+models_dict2 = {model: {variant: {re.split("_",os.path.basename(filename))[0]:os.path.basename(filename)  for filename in filenames} for variant, filenames in variant.items()} for model, variant in models_dict.items()}
+```
+
+```python
+# boilerplate
+# [[filenames for variant, filenames in variant.items()] for model, variant in models_dict.items()]
+```
+
+## Import Boundary and bbox
+
+```{python}
+kantonsgrenze = gpd.read_file("../data/swissBOUNDARIES3D_1_3_LV95_LN02.gdb/", layer = "TLM_KANTONSGEBIET").query("NAME == 'Luzern'") 
+# fiona.listlayers("data/swissBOUNDARIES3D_1_3_LV95_LN02.gdb/")
+
+# buffer it with 2km, transform it to wsg84 and get the bounding box
+kanton_bounds = kantonsgrenze.buffer(2000).to_crs(4326).bounds.reset_index(drop = True).to_dict()
+kanton_bounds = {key: val[0] for key, val in kanton_bounds.items()}
+```
+
+```{python}
+# make sure that the order of the variables maches the order above
+minx, miny, maxx, maxy = kanton_bounds.values()
+```
+
+
+
+```{python}
+prognosis_all = {model: {variant: xr.open_mfdataset(filenames) for variant, filenames in variant.items()} for model, variant in models_dict.items()}
+```
+
+
+## Define functions
+
+```{python}
+
+# Calculate the hugglin index for a day
+def hugglin_index(x):
+    return (((x.tas-10)+(x.tasmax-10))/2)*1.045
+
+# Calculate the hugglin index over a year
+def hugglin_year(x, year):
+    y = x.sel(time = slice(str(year)+"-04-01", str(year)+"-09-30")).groupby("time").map(hugglin_index).sum(dim="time")
+    y = y.where(y > 0, other = 0).fillna(0)
+    return y
+
+# Calculate the hugglin index for a year, whithin a bounding box (extends hugglin_year)
+def hugglin_bbox(x, year, minx, maxx, miny, maxy):
+    y = x.sel(lon = slice(minx, maxx), lat = slice(miny, maxy))
+    y = hugglin_year(y, year)
+    y.name = str(year)
+    return y
+
+# Calculate the mean hugglin index over a period (extends hugglin_bbox). 
+# Also adds the szenario name to the output. bbox should be part of the input, using the global vars makes
+# it prone to errors.
+def hugglin_szenario(filenames, szenario, years):
+    ds = xr.open_mfdataset(filenames)
+    ds_hugg = xr.concat([hugglin_bbox(ds, year, minx, maxx, miny, maxy) for year in years], "year").mean(dim = "year")
+    ds_hugg.name = szenario
+    return ds_hugg
+
+```
+
+What I need to calculate is the following (pseudocode):
+
+```
+for years in 2031-2040:
+    for days in 30.04-01.04:
+        ((tas-10)+(tas_max-10))/2*1.045
+        
+```
+
+```{python}
+# each range consists of 10 years (the upper limit is exclusive in python)
+ranges = {"2012-2021": range(2012, 2022), "2031-2040": range(2031, 2041), "2051-2060": range(2051, 2061)}
+
+for model, scenarios in models_dict.items():
+    for szenario, filenames in scenarios.items():
+        print(f"{model}, {szenario}")
+        for rangename, rangerange in ranges.items(): 
+            out = hugglin_szenario(filenames, szenario, rangerange)
+            print(f".......calculation done, writing {rangename} now")
+            out.rio.to_raster(f"../output/{model}_{szenario}_{rangename}.tif")
+
+```
+
