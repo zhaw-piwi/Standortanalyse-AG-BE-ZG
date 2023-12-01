@@ -68,7 +68,7 @@ def hugglin_index(x):
 # Calculate the hugglin index over a year
 def hugglin_year(x, year):
     y = x.sel(time = slice(str(year)+"-04-01", str(year)+"-09-30")).groupby("time").map(hugglin_index).sum(dim="time")
-    y = y.where(y > 0, other = 0).fillna(0)
+    y = y.where(y > 0, other = 0).fillna(0) # whats happening here again?
     return y
 
 # Calculate the hugglin index for a year, whithin a bounding box (extends hugglin_year)
@@ -112,3 +112,11 @@ for model, scenarios in models_dict.items():
 
 ```
 
+
+
+## Add CRS
+
+```{bash}
+find output/*.tif -exec gdal_edit.py -a_srs EPSG:4326 {} \;
+
+```
