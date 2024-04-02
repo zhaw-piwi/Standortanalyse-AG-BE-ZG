@@ -4,3 +4,6 @@
 **/*.gdb/*
 **/.goutputstream-IUZVJ1
 output/
+.Rproj.user
+data-out
+data
