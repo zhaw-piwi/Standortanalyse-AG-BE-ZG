@@ -9,6 +9,8 @@ library(purrr)
 library(glue)
 library(ggplot2)
 
+overwrite <- FALSE
+
 
 # given a vector of length n, select k elements in a rolling /
 # moving window fashion. This will produce a list of length
@@ -70,7 +72,7 @@ ret <- pmap(files_recent, \(From, To, year, TabsD, TmaxD){
   
   HI <- crop(HI_ch, kantone_filter)
   
-  # writeRaster(HI_mueller_thurgau, glue("data-out/HI-historic/{year}.tif"),overwrite = TRUE)
+  # writeRaster(HI_mueller_thurgau, glue("data-out/HI-historic/{year}.tif"),overwrite = overwrite)
   names(HI) <- year
   HI
 },.progress = TRUE)
@@ -87,10 +89,10 @@ HI_all <- rast(ret)
 #   HI_mean
 # })
 
-HI_all |> 
-  names() |> 
-  as.integer() |> 
-  (\(x) x %% 10 == 3)()
+# HI_all |> 
+#   names() |> 
+#   as.integer() |> 
+#   (\(x) x %% 10 == 3)()
 
 from <- c(1974, 1984, 1994, 2004, 2014)
 to <- from + 9
@@ -107,47 +109,59 @@ HI_av <- map2(from, to, \(from, to){
 })
 
 
+swissaltiregio <- rast("data/swissAltiRegio/swissaltiregio_2056_5728.tif")
+
 swissalti3d <- rast("data/swissAlti3D_mosaic.tif")
-dhm25 <- rast("data/DHM25_MM_ASCII_GRID/ASCII_GRID_1part/dhm25_grid_raster.asc")
-crs(dhm25) <- "epsg:21781"
+# dhm25 <- rast("data/DHM25_MM_ASCII_GRID/ASCII_GRID_1part/dhm25_grid_raster.asc")
+# crs(dhm25) <- "epsg:21781"
 
-dhm25_2056 <- project(dhm25, "epsg:2056")
-plot(swissalti3d)
+# dhm25_2056 <- project(dhm25, "epsg:2056")
+plot(swissaltiregio)
+
+swissaltiregio_crop <- crop(swissaltiregio, HI_av[[1]])
+
+swissaltiregio_res <- resample(swissaltiregio_crop, HI_av[[1]],"bilinear")
+
+# swissaltiregio_res2 <- resample(swissaltiregio_crop, disagg(HI_av[[1]], 100), "bilinear")
 
 
-dhm25_res <- resample(dhm25_2056, HI_av[[1]],"bilinear")
-
-dhm25_res2 <- resample(dhm25_2056, disagg(HI_av[[1]], 40))
-
-
-HI_downscale <- sapply(HI_av, \(x){
-  HI_norm <- x+dhm25_res * 1.1895
-  HI_down <- disagg(HI_norm, 40)
-  HI_up <- HI_down - dhm25_res2 * 1.1895
+HI_downscale <- map(HI_av, \(x){
+  HI_norm <- x + swissaltiregio_res * 1.1895
+  HI_down <- disagg(HI_norm, 100)
+  HI_up <- HI_down - swissaltiregio_crop * 1.1895
   HI_up
-})
+}, .progress = TRUE)
 
 
-lapply(HI_downscale, \(x){
+# Get the full range of both rasters
+lims <- range(minmax(HI_av[[1]]), minmax(HI_downscale[[1]]))
+
+# plot both rasters with the range of both rasters
+# (makes it easier to compare them)
+plot(HI_av[[1]], range = lims)
+plot(HI_downscale[[1]], range = lims)
+
+
+# Export the historicm, downscaled HI values
+map(HI_downscale, \(x){
   years <- names(x)
-  writeRaster(x, glue("data-out/HI-historic/{years}.tif"))
-})
+  if(overwrite) writeRaster(x, glue("data-out/HI-historic/{years}.tif"),overwrite = overwrite)
+}, .progress = TRUE)
 
-writeRaster(dhm25_res2, "data-out/dhm25.tif")
 
-dhm25_slope <- terrain(dhm25_res2, v = "slope", unit = "radians")
-dhm25_slope_perc <- tan(dhm25_slope) * 100
+swissaltiregio_slope <- terrain(swissaltiregio_crop, v = "slope", unit = "radians")
+swissaltiregio_slope_perc <- tan(swissaltiregio_slope) * 100
 
-dhm25_aspect <- terrain(dhm25_res2, v = "aspect")
+writeRaster(swissaltiregio_crop, "data-out/swissaltiregio.tif", overwrite = overwrite)
+writeRaster(swissaltiregio_slope_perc, "data-out/slope.tif", overwrite = overwrite)
 
-writeRaster(dhm25_res2, "data-out/dhm25.tif", overwrite = TRUE)
-writeRaster(dhm25_slope_perc, "data-out/slope.tif", overwrite = TRUE)
 
+swissaltiregio_aspect <- terrain(swissaltiregio_crop, v = "aspect")
 ausrichtung <- seq(0, 360, 45)
 
 himmelsrichtungen <- c("N", "NE", "E", "SE", "S", "SW", "W", "NW", "N")
 names(ausrichtung) <- himmelsrichtungen
-
+# this seems to be the simplest way:
 himmelsrichtungen_int <- c(1:8,1)
 
 classes <- matrix(
@@ -158,73 +172,56 @@ classes <- matrix(
   ),ncol = 3
 )
 
-dhm25_aspect2 <- classify(dhm25_aspect,classes)
+swissaltiregio_aspect2 <- classify(swissaltiregio_aspect,classes)
 
 cls_df <- tibble(id = himmelsrichtungen_int, azimut = himmelsrichtungen) |> 
-  head(-1)
+  head(-1) # since N is twice
 
-levels(dhm25_aspect2) <- cls_df
-writeRaster(dhm25_aspect2, "data-out/exposition_class.tif", overwrite = TRUE)
-writeRaster(dhm25_aspect, "data-out/exposition.tif", overwrite = TRUE)
-
-
-
-
-HI_sf <- lapply(HI_downscale, \(x){
-  x
-  
-  HI_classify <-  terra::classify(x,c(-Inf, 1400, 2100,Inf))
-  
-  levs_df <- tibble(value = 0:2, category = c("zu tief", "optimal", "zu hoch"))
-  
-  levels(HI_classify) <- levs_df
-  
-  HI_sf <- st_as_sf(as.polygons(HI_classify))
-  
-  HI_optimal <- HI_sf |>
-    filter(category == "optimal") |>
-    mutate(year = names(x)) |> 
-    dplyr::select(-category)
-  
-  HI_optimal
-})
-
-HI_sf2 <- do.call(rbind, HI_sf)
+levels(swissaltiregio_aspect2) <- cls_df
+writeRaster(swissaltiregio_aspect2, "data-out/exposition_class.tif", overwrite = overwrite)
+writeRaster(swissaltiregio_aspect, "data-out/exposition.tif", overwrite = overwrite)
 
 
 
-HI_sf3 <- HI_sf2 |> 
-  separate_wider_delim(year, "-",names = c("from","to"),cols_remove = FALSE) |> 
-  mutate(across(c(from,to), as.integer)) |> 
-  st_as_sf() |> 
-  group_by(from, to, year) |> 
-  summarise() |> 
-  arrange(desc(from))
-
-write_sf(HI_sf3, "data-out/HI_sf3.gpkg")
-
-# library(smoothr)
-# 
-# HI_chaikin <- smoothr::smooth(HI_sf3,method = "chaikin")
-# HI_chaikin_20 <- smoothr::smooth(HI_sf3,method = "chaikin", refinements = 10)
 # 
 # 
-# HI_ksmooth <- smoothr::smooth(HI_sf3,method = "ksmooth")
-# HI_spline <- smoothr::smooth(HI_sf3,method = "spline")
-# HI_densify <- smoothr::smooth(HI_sf3,method = "densify")
-
-
-ggplot(HI_sf3) +
-  geom_sf(data = kantone_filter, inherit.aes = FALSE) +
-  geom_sf(fill = "red", alpha = 0.3) +
-  # scale_fill_gradient(low = "red", high = "blue") +
-  facet_wrap(~year)
-
-
-
-ggplot(HI_densify) +
-  geom_sf(data = kantone_filter, inherit.aes = FALSE) +
-  geom_sf(aes(fill = from, alpha = 0.3)) +
-  scale_fill_gradientn(colours  = RColorBrewer::brewer.pal(4, "Spectral"))  +
-  facet_wrap(~year)
-
+# 
+# HI_sf2 <- do.call(rbind, HI_sf)
+# 
+# 
+# 
+# HI_sf3 <- HI_sf2 |> 
+#   separate_wider_delim(year, "-",names = c("from","to"),cols_remove = FALSE) |> 
+#   mutate(across(c(from,to), as.integer)) |> 
+#   st_as_sf() |> 
+#   group_by(from, to, year) |> 
+#   summarise() |> 
+#   arrange(desc(from))
+# 
+# write_sf(HI_sf3, "data-out/HI_sf3.gpkg")
+# 
+# # library(smoothr)
+# # 
+# # HI_chaikin <- smoothr::smooth(HI_sf3,method = "chaikin")
+# # HI_chaikin_20 <- smoothr::smooth(HI_sf3,method = "chaikin", refinements = 10)
+# # 
+# # 
+# # HI_ksmooth <- smoothr::smooth(HI_sf3,method = "ksmooth")
+# # HI_spline <- smoothr::smooth(HI_sf3,method = "spline")
+# # HI_densify <- smoothr::smooth(HI_sf3,method = "densify")
+# 
+# 
+# ggplot(HI_sf3) +
+#   geom_sf(data = kantone_filter, inherit.aes = FALSE) +
+#   geom_sf(fill = "red", alpha = 0.3) +
+#   # scale_fill_gradient(low = "red", high = "blue") +
+#   facet_wrap(~year)
+# 
+# 
+# 
+# ggplot(HI_densify) +
+#   geom_sf(data = kantone_filter, inherit.aes = FALSE) +
+#   geom_sf(aes(fill = from, alpha = 0.3)) +
+#   scale_fill_gradientn(colours  = RColorBrewer::brewer.pal(4, "Spectral"))  +
+#   facet_wrap(~year)
+# 
