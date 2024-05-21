@@ -25,16 +25,6 @@ roll_select <- function(n, k){
   })
 }
 
-# ```
-# for years in 2012-2021:
-#   for days in 01.04.year-30.09.year):
-#   ((tas-10)+(tas_max-10))/2*1.045
-# 
-# ```
-
-# TabsD: Daily mean temperature (1961 – present)
-# TmaxD: Daily maximum temperature (1961 – present)
-
 kantone <- read_sf("data/swissboundaries3d/swissBOUNDARIES3D_1_5_LV95_LN02.gpkg", "tlm_kantonsgebiet")[,"name"]
 
 kantone_filter <- kantone |> 
@@ -95,15 +85,16 @@ HI_all <- rast(ret)
 #   (\(x) x %% 10 == 3)()
 
 from <- c(1974, 1984, 1994, 2004, 2014)
-to <- from + 9
 
-HI_av <- map2(from, to, \(from, to){
+HI_av <- map(from, \(from){
+  
+  to <- from + 10
   
   years <- HI_all |> 
     names() |> 
     as.integer() 
   
-  HI_mean <- mean(HI_all[[years >= from & years <= to]])
+  HI_mean <- mean(HI_all[[years >= from & years < to]])
   names(HI_mean) <- paste(from, to, sep = "-")
   HI_mean
 })
