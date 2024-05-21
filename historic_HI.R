@@ -1,13 +1,14 @@
 
 
-library(terra)
-library(dplyr)
-library(tidyr)
-library(lubridate)
-library(sf)
-library(purrr)
-library(glue)
-library(ggplot2)
+library("terra")
+library("dplyr")
+library("tidyr")
+library("lubridate")
+library("sf")
+library("purrr")
+library("glue")
+library("ggplot2")
+library("readr")
 
 overwrite <- FALSE
 
@@ -102,19 +103,9 @@ HI_av <- map(from, \(from){
 
 swissaltiregio <- rast("data/swissAltiRegio/swissaltiregio_2056_5728.tif")
 
-swissalti3d <- rast("data/swissAlti3D_mosaic.tif")
-# dhm25 <- rast("data/DHM25_MM_ASCII_GRID/ASCII_GRID_1part/dhm25_grid_raster.asc")
-# crs(dhm25) <- "epsg:21781"
-
-# dhm25_2056 <- project(dhm25, "epsg:2056")
-plot(swissaltiregio)
-
 swissaltiregio_crop <- crop(swissaltiregio, HI_av[[1]])
 
 swissaltiregio_res <- resample(swissaltiregio_crop, HI_av[[1]],"bilinear")
-
-# swissaltiregio_res2 <- resample(swissaltiregio_crop, disagg(HI_av[[1]], 100), "bilinear")
-
 
 HI_downscale <- map(HI_av, \(x){
   HI_norm <- x + swissaltiregio_res * 1.1895
@@ -136,18 +127,17 @@ plot(HI_downscale[[1]], range = lims)
 # Export the historicm, downscaled HI values
 map(HI_downscale, \(x){
   years <- names(x)
-  if(overwrite) writeRaster(x, glue("data-out/HI-historic/{years}.tif"),overwrite = overwrite)
+  if(overwrite){
+    writeRaster(x, glue("data-out/HI-historic/{years}.tif"),overwrite = overwrite)
+  }
 }, .progress = TRUE)
 
 
-swissaltiregio_slope <- terrain(swissaltiregio_crop, v = "slope", unit = "radians")
-swissaltiregio_slope_perc <- tan(swissaltiregio_slope) * 100
+korrekturfaktoren <- read_csv("korrekturfaktoren.csv")
 
-writeRaster(swissaltiregio_crop, "data-out/swissaltiregio.tif", overwrite = overwrite)
-writeRaster(swissaltiregio_slope_perc, "data-out/slope.tif", overwrite = overwrite)
-
-
+swissaltiregio_slope_deg <- terrain(swissaltiregio_crop, v = "slope", unit = "degrees")
 swissaltiregio_aspect <- terrain(swissaltiregio_crop, v = "aspect")
+
 ausrichtung <- seq(0, 360, 45)
 
 himmelsrichtungen <- c("N", "NE", "E", "SE", "S", "SW", "W", "NW", "N")
@@ -169,50 +159,46 @@ cls_df <- tibble(id = himmelsrichtungen_int, azimut = himmelsrichtungen) |>
   head(-1) # since N is twice
 
 levels(swissaltiregio_aspect2) <- cls_df
-writeRaster(swissaltiregio_aspect2, "data-out/exposition_class.tif", overwrite = overwrite)
-writeRaster(swissaltiregio_aspect, "data-out/exposition.tif", overwrite = overwrite)
+
+korrekturfaktoren$Hangneigung_bis <- lead(korrekturfaktoren$Hangneigung, default = 90)
+
+swissaltiregio_slope_deg2 <- pmap(levels(swissaltiregio_aspect2)[[1]], \(id, azimut){
+  
+  
+  recl <- korrekturfaktoren[,c("Hangneigung", "Hangneigung_bis", azimut)]
+  
+  swissaltiregio_slope_recl <- classify(swissaltiregio_slope_deg, recl, include.lowest = TRUE)
+  
+  swissaltiregio_slope_recl[swissaltiregio_aspect2 != id] <- NA
+  
+  swissaltiregio_slope_recl
+  
+}, .progress = TRUE) |> 
+  rast() |> 
+  min(na.rm = TRUE)
 
 
 
-# 
-# 
-# 
-# HI_sf2 <- do.call(rbind, HI_sf)
-# 
-# 
-# 
-# HI_sf3 <- HI_sf2 |> 
-#   separate_wider_delim(year, "-",names = c("from","to"),cols_remove = FALSE) |> 
-#   mutate(across(c(from,to), as.integer)) |> 
-#   st_as_sf() |> 
-#   group_by(from, to, year) |> 
-#   summarise() |> 
-#   arrange(desc(from))
-# 
-# write_sf(HI_sf3, "data-out/HI_sf3.gpkg")
-# 
-# # library(smoothr)
-# # 
-# # HI_chaikin <- smoothr::smooth(HI_sf3,method = "chaikin")
-# # HI_chaikin_20 <- smoothr::smooth(HI_sf3,method = "chaikin", refinements = 10)
-# # 
-# # 
-# # HI_ksmooth <- smoothr::smooth(HI_sf3,method = "ksmooth")
-# # HI_spline <- smoothr::smooth(HI_sf3,method = "spline")
-# # HI_densify <- smoothr::smooth(HI_sf3,method = "densify")
-# 
-# 
-# ggplot(HI_sf3) +
-#   geom_sf(data = kantone_filter, inherit.aes = FALSE) +
-#   geom_sf(fill = "red", alpha = 0.3) +
-#   # scale_fill_gradient(low = "red", high = "blue") +
-#   facet_wrap(~year)
-# 
-# 
-# 
-# ggplot(HI_densify) +
-#   geom_sf(data = kantone_filter, inherit.aes = FALSE) +
-#   geom_sf(aes(fill = from, alpha = 0.3)) +
-#   scale_fill_gradientn(colours  = RColorBrewer::brewer.pal(4, "Spectral"))  +
-#   facet_wrap(~year)
-# 
+
+HI_downscale * swissaltiregio_slope_deg2
+
+tmp <- (2000 * (1 - swissaltiregio_slope_deg2))
+HI_downscale_korr <- lapply(HI_downscale, \(x){
+  
+  y <- x - tmp
+  y[y < 0] <- NA
+  y
+})
+
+
+# Get the full range of both rasters
+lims <- range(minmax(HI_downscale[[1]]), minmax(HI_downscale_korr[[1]]))
+
+# plot both rasters with the range of both rasters
+# (makes it easier to compare them)
+plot(HI_downscale[[1]], range = lims)
+plot(HI_downscale_korr[[1]], range = lims)
+
+
+
+
