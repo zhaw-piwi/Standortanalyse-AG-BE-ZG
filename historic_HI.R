@@ -1,5 +1,9 @@
 
 
+################################################################################
+## Load libraries / Functions
+################################################################################
+
 library("terra")
 library("dplyr")
 library("tidyr")
@@ -26,6 +30,11 @@ roll_select <- function(n, k){
   })
 }
 
+################################################################################
+## Load Data
+################################################################################
+
+
 kantone <- read_sf("data/swissboundaries3d/swissBOUNDARIES3D_1_5_LV95_LN02.gpkg", "tlm_kantonsgebiet")[,"name"]
 
 kantone_filter <- kantone |> 
@@ -47,6 +56,10 @@ files_recent <- files_df |>
   filter(year >= 1971) |>
   pivot_wider(names_from = Variable, values_from = filename)
 
+
+################################################################################
+## Calculate HI per year
+################################################################################
 
 
 
@@ -85,6 +98,12 @@ HI_all <- rast(ret)
 #   as.integer() |> 
 #   (\(x) x %% 10 == 3)()
 
+
+################################################################################
+## Calculate mean HI per decade
+################################################################################
+
+
 from <- c(1974, 1984, 1994, 2004, 2014)
 
 HI_av <- map(from, \(from){
@@ -99,6 +118,11 @@ HI_av <- map(from, \(from){
   names(HI_mean) <- paste(from, to, sep = "-")
   HI_mean
 })
+
+
+################################################################################
+## Downscale to 10m resolution via Elevation
+################################################################################
 
 
 swissaltiregio <- rast("data/swissAltiRegio/swissaltiregio_2056_5728.tif")
@@ -124,13 +148,17 @@ plot(HI_av[[1]], range = lims)
 plot(HI_downscale[[1]], range = lims)
 
 
-# Export the historicm, downscaled HI values
+# Export the historic, downscaled HI values
 map(HI_downscale, \(x){
   years <- names(x)
   if(overwrite){
     writeRaster(x, glue("data-out/HI-historic/{years}.tif"),overwrite = overwrite)
   }
 }, .progress = TRUE)
+
+################################################################################
+## Correct HI via Exposition and Slope
+################################################################################
 
 
 korrekturfaktoren <- read_csv("korrekturfaktoren.csv")
