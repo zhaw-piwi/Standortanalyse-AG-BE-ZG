@@ -16,19 +16,7 @@ library("readr")
 
 overwrite <- FALSE
 
-
-# given a vector of length n, select k elements in a rolling /
-# moving window fashion. This will produce a list of length
-# n - k + 1
-roll_select <- function(n, k){
-  
-  stopifnot(n >= k)
-  lapply(seq_len(n-k+1), \(x){
-    vec <- rep(FALSE,n)
-    vec[x:(x+k-1)] <- TRUE
-    vec
-  })
-}
+terraOptions(progress = 0)
 
 ################################################################################
 ## Load Data
@@ -84,23 +72,9 @@ ret <- pmap(files_recent, \(From, To, year, TabsD, TmaxD){
 
 HI_all <- rast(ret)
 
-# rolling mean
-# HI_rollmean <- lapply(roll_select(nlyr(HI_all),11),\(x){
-#   HI_sel <- HI_all[[x]]
-#   year <- paste(range(as.numeric(names(HI_sel))),collapse = "-")
-#   HI_mean <- mean(HI_sel)
-#   names(HI_mean) <- year
-#   HI_mean
-# })
-
-# HI_all |> 
-#   names() |> 
-#   as.integer() |> 
-#   (\(x) x %% 10 == 3)()
-
 
 ################################################################################
-## Calculate mean HI per decade
+## Mean HI per decade
 ################################################################################
 
 
@@ -117,7 +91,7 @@ HI_av <- map(from, \(from){
   HI_mean <- mean(HI_all[[years >= from & years < to]])
   names(HI_mean) <- paste(from, to, sep = "-")
   HI_mean
-})
+}, .progress = TRUE)
 
 
 ################################################################################
@@ -129,7 +103,7 @@ swissaltiregio <- rast("data/swissAltiRegio/swissaltiregio_2056_5728.tif")
 
 swissaltiregio_crop <- crop(swissaltiregio, HI_av[[1]])
 
-swissaltiregio_res <- resample(swissaltiregio_crop, HI_av[[1]],"bilinear")
+swissaltiregio_res <- resample(swissaltiregio_crop, HI_av[[1]])
 
 HI_downscale <- map(HI_av, \(x){
   HI_norm <- x + swissaltiregio_res * 1.1895
@@ -139,94 +113,85 @@ HI_downscale <- map(HI_av, \(x){
 }, .progress = TRUE)
 
 
-# Get the full range of both rasters
-lims <- range(minmax(HI_av[[1]]), minmax(HI_downscale[[1]]))
 
-# plot both rasters with the range of both rasters
-# (makes it easier to compare them)
-plot(HI_av[[1]], range = lims)
-plot(HI_downscale[[1]], range = lims)
-
-
-# Export the historic, downscaled HI values
-map(HI_downscale, \(x){
-  years <- names(x)
-  if(overwrite){
-    writeRaster(x, glue("data-out/HI-historic/{years}.tif"),overwrite = overwrite)
-  }
-}, .progress = TRUE)
 
 ################################################################################
 ## Correct HI via Exposition and Slope
 ################################################################################
 
+swissaltiregio_slope_deg <- terrain(swissaltiregio_crop, v = "slope", unit = "degrees") |> 
+  round() |> # dont reclassify with "from-to → becomes" but "is → becomes"
+  as.int()
 
-korrekturfaktoren <- read_csv("korrekturfaktoren.csv")
-
-swissaltiregio_slope_deg <- terrain(swissaltiregio_crop, v = "slope", unit = "degrees")
 swissaltiregio_aspect <- terrain(swissaltiregio_crop, v = "aspect")
 
 ausrichtung <- seq(0, 360, 45)
 
 himmelsrichtungen <- c("N", "NE", "E", "SE", "S", "SW", "W", "NW", "N")
-names(ausrichtung) <- himmelsrichtungen
-# this seems to be the simplest way:
 himmelsrichtungen_int <- c(1:8,1)
 
-classes <- matrix(
-  c(
-    ausrichtung-45/2,
-    ausrichtung+45/2,
-    himmelsrichtungen_int
-  ),ncol = 3
-)
 
-swissaltiregio_aspect2 <- classify(swissaltiregio_aspect,classes)
+classes_df <- tibble(himmelsrichtungen, himmelsrichtungen_int, ausrichtung) |> 
+  mutate(
+    von = ausrichtung - 45/2,
+    von = ifelse(von < 0, 0, von),
+    bis = ausrichtung + 45/2,
+    bis = ifelse(bis > 360, 360, bis)
+  ) 
 
-cls_df <- tibble(id = himmelsrichtungen_int, azimut = himmelsrichtungen) |> 
-  head(-1) # since N is twice
+classes <- classes_df |> 
+  select(von, bis, himmelsrichtungen_int) |> 
+  as.matrix()
+
+swissaltiregio_aspect2 <- classify(swissaltiregio_aspect,classes, include.lowest = TRUE)
+
+cls_df <- classes_df |> 
+  select(himmelsrichtungen_int, himmelsrichtungen) |> 
+  head(-1)# since N is twice
 
 levels(swissaltiregio_aspect2) <- cls_df
 
-korrekturfaktoren$Hangneigung_bis <- lead(korrekturfaktoren$Hangneigung, default = 90)
-
-swissaltiregio_slope_deg2 <- pmap(levels(swissaltiregio_aspect2)[[1]], \(id, azimut){
-  
-  
-  recl <- korrekturfaktoren[,c("Hangneigung", "Hangneigung_bis", azimut)]
-  
-  swissaltiregio_slope_recl <- classify(swissaltiregio_slope_deg, recl, include.lowest = TRUE)
-  
-  swissaltiregio_slope_recl[swissaltiregio_aspect2 != id] <- NA
-  
-  swissaltiregio_slope_recl
-  
-}, .progress = TRUE) |> 
-  rast() |> 
-  min(na.rm = TRUE)
+korrekturfaktoren <- read_csv("korrekturfaktoren.csv") |> 
+  mutate(Hangneigung = as.integer(Hangneigung))
 
 
+# replace with the future_HI method
+# slope_aspect_korrektur <- pmap(levels(swissaltiregio_aspect2)[[1]], \(himmelsrichtungen_int,himmelsrichtungen){
+# 
+#   recl <- korrekturfaktoren[,c("Hangneigung", himmelsrichtungen)]
+#   
+#   # others = 0: all slopes > 45 will become 0. I'd rather not have NA's, 0 is easier
+#   swissaltiregio_slope_recl <- classify(swissaltiregio_slope_deg, recl, others = 0)
+#   
+#   # The NA's introduced here disapppear in the next step min(na.rm = TRUE)
+#   swissaltiregio_slope_recl[swissaltiregio_aspect2 != himmelsrichtungen_int] <- NA
+#   
+#   swissaltiregio_slope_recl
+# }, .progress = TRUE) |> 
+#   rast() |> 
+#   min(na.rm = TRUE)
 
 
-HI_downscale * swissaltiregio_slope_deg2
-
-tmp <- (2000 * (1 - swissaltiregio_slope_deg2))
-HI_downscale_korr <- lapply(HI_downscale, \(x){
-  
+tmp <- (2000 * (1 - slope_aspect_korrektur))
+HI_corrected <- map(HI_downscale, \(x){
   y <- x - tmp
-  y[y < 0] <- NA
+  y[y < 0] <- 0
   y
-})
+}, .progress = TRUE)
+
+################################################################################
+## Export
+################################################################################
 
 
-# Get the full range of both rasters
-lims <- range(minmax(HI_downscale[[1]]), minmax(HI_downscale_korr[[1]]))
 
-# plot both rasters with the range of both rasters
-# (makes it easier to compare them)
-plot(HI_downscale[[1]], range = lims)
-plot(HI_downscale_korr[[1]], range = lims)
-
+# Export the historic, downscaled HI values
+map(HI_corrected, \(x){
+  years <- names(x)
+  if(overwrite){
+    writeRaster(x, glue("data-out/HI-historic/corrected/{years}.tif"),overwrite = overwrite)
+  }
+}, .progress = TRUE)
 
 
 
