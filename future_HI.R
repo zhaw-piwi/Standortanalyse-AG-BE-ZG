@@ -161,7 +161,7 @@ swissaltiregio_crop <- crop(swissaltiregio, files_wide2$HI_lowres[[1]])
 swissaltiregio_res <- resample(swissaltiregio_crop, HI_lowres[[1]])
 
 HI_downscale <- map(files_wide2$HI_lowres, \(x){
-  # browser()
+  browser()
   HI_norm <- x + swissaltiregio_res * 1.1895
   HI_down <- resample(HI_norm, swissaltiregio_crop)
 
