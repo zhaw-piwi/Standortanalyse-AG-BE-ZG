@@ -98,6 +98,19 @@ HI_av <- map(from, \(from){
 ## Downscale to 10m resolution via Elevation
 ################################################################################
 
+# Das Downscaling wurde in zwei Schritten durchgeführt. Als erstes wurde eine Höhenkorrektur des HI
+# durchgeführt. Dafür wurde das Ausgangsraster auf Meereshöhe normalisiert. Dabei wurde von einer
+# Abnahme der Lufttemperatur von 6.5°C pro 100 Höhenmeter ausgegangen 10,11. Für den Huglin-Index
+# entspricht das einer Abnahme von 1.1895 Punkten pro Höhenmeter (183 Tage * 0.0065 °C/m) und
+# wurde wie folgt berechnet:
+
+# HI-Raster normalisiert auf Meereshöhe (1km) = HI-Ausgangsraster (1km) + (Höhenlage (1km) * 1.1895)
+
+# Danach wurde die räumliche Auflösung des normalisierten HI-Rasters mittels resampling von 1km auf
+# 2m runterskaliert. Dabei wurden die resultierenden HI-Werte bilinear interpoliert. Im Anschluss wurde
+# der HI-Wert für die tatsächliche Höhenlage in der 2m-Auflösung wie folgt berechnet:
+
+# HI-Raster höhenkorrigiert (2m) = HI-Raster normalisiert auf Meereshöhe (2m) – (Höhenlage (2m) * 1.1895)
 
 swissaltiregio <- rast("data/swissAltiRegio/swissaltiregio_2056_5728.tif")
 
@@ -106,8 +119,9 @@ swissaltiregio_crop <- crop(swissaltiregio, HI_av[[1]])
 swissaltiregio_res <- resample(swissaltiregio_crop, HI_av[[1]])
 
 HI_downscale <- map(HI_av, \(x){
+  # browser()
   HI_norm <- x + swissaltiregio_res * 1.1895
-  HI_down <- disagg(HI_norm, 100)
+  HI_down <- disagg(HI_norm, 100, method = "bilinear")
   HI_up <- HI_down - swissaltiregio_crop * 1.1895
   HI_up
 }, .progress = TRUE)
@@ -155,29 +169,36 @@ korrekturfaktoren <- read_csv("korrekturfaktoren.csv") |>
   mutate(Hangneigung = as.integer(Hangneigung))
 
 
-# replace with the future_HI method
-# slope_aspect_korrektur <- pmap(levels(swissaltiregio_aspect2)[[1]], \(himmelsrichtungen_int,himmelsrichtungen){
-# 
-#   recl <- korrekturfaktoren[,c("Hangneigung", himmelsrichtungen)]
-#   
-#   # others = 0: all slopes > 45 will become 0. I'd rather not have NA's, 0 is easier
-#   swissaltiregio_slope_recl <- classify(swissaltiregio_slope_deg, recl, others = 0)
-#   
-#   # The NA's introduced here disapppear in the next step min(na.rm = TRUE)
-#   swissaltiregio_slope_recl[swissaltiregio_aspect2 != himmelsrichtungen_int] <- NA
-#   
-#   swissaltiregio_slope_recl
-# }, .progress = TRUE) |> 
-#   rast() |> 
-#   min(na.rm = TRUE)
+# Since we need to reclassify by 2 conditions (slope and aspect), we create a
+# new classification matrix that takes both factors into account (apect * 100 + slope)
+
+classes_df2 <- classes_df |> 
+  select(starts_with("himmelsrichtungen")) |> 
+  head(-1)
+
+korr_classify <- korrekturfaktoren |> 
+  pivot_longer(-Hangneigung, names_to = "himmelsrichtungen", values_to = "faktor") |> 
+  left_join(classes_df2, by = "himmelsrichtungen") |> 
+  transmute(
+    from = himmelsrichtungen_int*100 + Hangneigung,
+    to = faktor
+  )
 
 
-tmp <- (2000 * (1 - slope_aspect_korrektur))
+swissaltiregio_aspect_slope <- swissaltiregio_aspect2*100+swissaltiregio_slope_deg
+
+# This creates a "correction" raster based on the actual slope / aspect 
+slope_aspect_korrektur <- classify(swissaltiregio_aspect_slope, korr_classify, others = NA)
+
+# This correction raster is applied to a normalized version of the HI values
+slope_aspect_korrektur_normalized <- (2000 * (1 - slope_aspect_korrektur))
 HI_corrected <- map(HI_downscale, \(x){
-  y <- x - tmp
+  
+  y <- x - slope_aspect_korrektur_normalized
   y[y < 0] <- 0
   y
 }, .progress = TRUE)
+
 
 ################################################################################
 ## Export
