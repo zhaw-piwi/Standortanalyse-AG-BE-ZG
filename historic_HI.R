@@ -13,8 +13,9 @@ library("purrr")
 library("glue")
 library("ggplot2")
 library("readr")
-
-overwrite <- FALSE
+library("stringr")
+library("ncdf4")
+overwrite <- TRUE
 
 terraOptions(progress = 0)
 
@@ -28,9 +29,29 @@ kantone <- read_sf("data/swissboundaries3d/swissBOUNDARIES3D_1_5_LV95_LN02.gpkg"
 kantone_filter <- kantone |> 
   filter(name %in% c("Aargau", "Bern", "Zug"))
 
+# Data till end of 2023 is stored in a "one year per file" format
 ncs <- list.files("data/Klimadaten_Feb24", "\\.nc", full.names = TRUE,recursive = TRUE)
 
-files_df <- tibble(filename = ncs) |> 
+
+# Data from 2024 is stored in a "one month per file" format
+ncs_2024 <- list.files("data/TmaxD_und_TabsD_202401010000_202409300000","\\.nc", full.names = TRUE,recursive = TRUE)
+
+ncs_2024_TmaxD <- ncs_2024[str_detect(basename(ncs_2024), "TmaxD")]
+ncs_2024_TabsD <- ncs_2024[str_detect(basename(ncs_2024), "TabsD")]
+
+rast_2024_TmaxD <- rast(ncs_2024_TmaxD)
+rast_2024_TabsD <- rast(ncs_2024_TabsD)
+
+# write 2024 out in a "one year per file" format
+writeCDF(rast_2024_TmaxD, "data-tmp/TmaxD_ch01r.swiss.lv95_202401010000_202409300000.nc", overwrite = overwrite)
+writeCDF(rast_2024_TabsD, "data-tmp/TabsD_ch01r.swiss.lv95_202401010000_202409300000.nc", overwrite = overwrite)
+
+
+ncs_2024_new <- list.files("data-tmp/","\\.nc", full.names = TRUE,recursive = TRUE)
+
+all_ncs <- c(ncs, ncs_2024_new)
+
+files_df <- tibble(filename = all_ncs) |> 
   mutate(basename = basename(filename)) |> 
   tidyr::separate_wider_delim(cols = basename, "_", names = c("Variable",NA,"From","To")) |> 
   mutate(
@@ -38,11 +59,12 @@ files_df <- tibble(filename = ncs) |>
     To = as.Date(To, format = "%Y%m%d")
   )
 
-
 files_recent <- files_df |> 
   mutate(year = year(From)) |> 
   filter(year >= 1971) |>
   pivot_wider(names_from = Variable, values_from = filename)
+
+
 
 
 ################################################################################
@@ -52,7 +74,6 @@ files_recent <- files_df |>
 
 
 ret <- pmap(files_recent, \(From, To, year, TabsD, TmaxD){
-  # browser()
   tabsd <- rast(TabsD)
   tmaxd <- rast(TmaxD)
   
@@ -71,6 +92,7 @@ ret <- pmap(files_recent, \(From, To, year, TabsD, TmaxD){
 
 
 HI_all <- rast(ret)
+
 
 
 ################################################################################
@@ -118,14 +140,29 @@ swissaltiregio_crop <- crop(swissaltiregio, HI_av[[1]])
 
 swissaltiregio_res <- resample(swissaltiregio_crop, HI_av[[1]])
 
-HI_downscale <- map(HI_av, \(x){
-  # browser()
-  HI_norm <- x + swissaltiregio_res * 1.1895
-  HI_down <- disagg(HI_norm, 100, method = "bilinear")
-  HI_up <- HI_down - swissaltiregio_crop * 1.1895
+
+HI_downscale <- function(x, dhm_lowres, dhm_highres, factor = 100, correctionval = 1.895){
+  lowres <- unique(res(dhm_lowres))
+  highres <- unique(res(dhm_highres))
+  
+  stopifnot(length(lowres) == 1 & length(highres) == 1)
+  stopifnot(lowres / highres == factor)
+  
+  HI_norm <- x + (dhm_lowres * 1.1895)
+  HI_down <- disagg(HI_norm, factor, method = "bilinear")
+  HI_up <- HI_down - (dhm_highres * 1.1895)
   HI_up
+}
+
+
+
+HI_downscale <- map(HI_av, \(x){
+  HI_downscale(x, swissaltiregio_res, swissaltiregio_crop)
 }, .progress = TRUE)
 
+
+# since 2024 is special, I downscale this layer separately
+HI_2024_downscale <- HI_downscale(HI_all[["2024"]], swissaltiregio_res, swissaltiregio_crop)
 
 
 
@@ -192,13 +229,21 @@ slope_aspect_korrektur <- classify(swissaltiregio_aspect_slope, korr_classify, o
 
 # This correction raster is applied to a normalized version of the HI values
 slope_aspect_korrektur_normalized <- (2000 * (1 - slope_aspect_korrektur))
-HI_corrected <- map(HI_downscale, \(x){
-  
-  y <- x - slope_aspect_korrektur_normalized
+
+
+HI_correct <- function(x, subtraction_raster){
+  y <- x - subtraction_raster
   y[y < 0] <- 0
   y
+}
+
+HI_corrected <- map(HI_downscale, \(x){
+  HI_correct(x, slope_aspect_korrektur_normalized)
 }, .progress = TRUE)
 
+
+# since 2024 is special, I correct this layer separately
+HI_2024_corrected <- HI_correct(HI_2024_downscale, slope_aspect_korrektur_normalized)
 
 ################################################################################
 ## Export
@@ -213,6 +258,12 @@ map(HI_corrected, \(x){
     writeRaster(x, glue("data-out/HI-historic/corrected/{years}.tif"),overwrite = overwrite)
   }
 }, .progress = TRUE)
+
+
+# Since 2024 is special, I export this layer separately
+writeRaster(HI_all[["2024"]], "data-out/HI-historic/2024/2024_lowres.tif", overwrite = overwrite)
+writeRaster(HI_2024_downscale, "data-out/HI-historic/2024/2024_downscaled.tif", overwrite = overwrite)
+writeRaster(HI_2024_corrected, "data-out/HI-historic/2024/2024_corrected.tif", overwrite = overwrite)
 
 
 

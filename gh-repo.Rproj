@@ -1,4 +1,5 @@
 Version: 1.0
+ProjectId: 771094d7-bbfa-4a34-97d9-9d7b932833f2
 
 RestoreWorkspace: Default
 SaveWorkspace: Default
@@ -11,3 +12,5 @@ Encoding: UTF-8
 
 RnwWeave: Sweave
 LaTeX: pdfLaTeX
+
+ProjectName: PIWI 
